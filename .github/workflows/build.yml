@@ -101,14 +101,19 @@ jobs:
 
       - name: Build
         run: |
+          # Source is mounted at /workspaces/edgetx - the same path as the
+          # OLEDBOXER author's Gitpod builds, so binaries are reproducible
+          # (some targets embed the source path in assert strings).
           docker run --rm \
-            -v "$GITHUB_WORKSPACE:/w" -w /w/edgetx \
+            -v "$GITHUB_WORKSPACE/edgetx:/workspaces/edgetx" -w /workspaces/edgetx \
+            -v "$GITHUB_WORKSPACE/mod:/mod:ro" \
+            -v "$GITHUB_WORKSPACE/out:/out" \
             -e TARGET=${{ matrix.target }} \
             -e VERSION=${{ needs.check.outputs.version }} \
             -e STICK_MODE=${{ inputs.stick_mode || '2' }} \
-            -e OUT_DIR=/w/out \
+            -e OUT_DIR=/out \
             ${{ steps.img.outputs.image }} \
-            bash /w/mod/scripts/build.sh
+            bash /mod/scripts/build.sh
 
       - uses: actions/upload-artifact@v4
         with:

@@ -55,8 +55,8 @@ zmienić pre-release na zwykłe wydanie.
 ```bash
 git clone --recursive --branch v2.12.5 https://github.com/EdgeTX/edgetx.git
 bash scripts/apply-oled-patch.sh edgetx
-docker run --rm -v "$PWD:/w" -w /w/edgetx -e TARGET=boxer -e VERSION=2.12.5 -e OUT_DIR=/w/out \
-  ghcr.io/edgetx/edgetx-dev:2.12 bash /w/scripts/build.sh
+docker run --rm -v "$PWD:/workspaces" -w /workspaces/edgetx -e TARGET=boxer -e VERSION=2.12.5 -e OUT_DIR=/workspaces/out \
+  ghcr.io/edgetx/edgetx-dev:2.12 bash /workspaces/scripts/build.sh
 ```
 
 ## Licencja
