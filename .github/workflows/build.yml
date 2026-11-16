@@ -1,0 +1,160 @@
+name: Build OLED firmware
+
+on:
+  schedule:
+    - cron: "17 3 * * *"      # every day at 03:17 UTC
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "EdgeTX tag to build (e.g. v2.12.5). Empty = newest stable release"
+        required: false
+        default: ""
+      stick_mode:
+        description: "Default stick mode baked into firmware (1-4)"
+        required: false
+        default: "2"
+      force:
+        description: "Rebuild even if a release for this version already exists"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: oled-build
+  cancel-in-progress: false
+
+jobs:
+  check:
+    name: Check for new EdgeTX release
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.pick.outputs.tag }}
+      version: ${{ steps.pick.outputs.version }}
+      build: ${{ steps.pick.outputs.build }}
+    steps:
+      - id: pick
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_VERSION: ${{ inputs.version }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          set -euo pipefail
+          if [[ -n "${INPUT_VERSION:-}" ]]; then
+            tag="$INPUT_VERSION"
+          else
+            # Highest semver among stable releases (not "latest by date":
+            # EdgeTX publishes maintenance releases of older lines too).
+            tag=$(gh api "repos/EdgeTX/edgetx/releases?per_page=50" \
+                    --jq '.[] | select(.draft|not) | select(.prerelease|not) | .tag_name' \
+                  | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1)
+          fi
+          version="${tag#v}"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+          if [[ "${FORCE:-false}" != "true" ]] && \
+             gh release view "oled-$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release oled-$tag already exists - nothing to do."
+            echo "build=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Will build EdgeTX $tag"
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    name: Build ${{ matrix.target }}
+    needs: check
+    if: needs.check.outputs.build == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [boxer, tx12, tx12mk2, zorro, pocket, mt12, t12max]
+    steps:
+      - name: Checkout this repo
+        uses: actions/checkout@v4
+        with:
+          path: mod
+
+      - name: Checkout EdgeTX ${{ needs.check.outputs.tag }}
+        uses: actions/checkout@v4
+        with:
+          repository: EdgeTX/edgetx
+          ref: ${{ needs.check.outputs.tag }}
+          submodules: recursive
+          path: edgetx
+
+      - name: Apply OLED patch
+        run: bash mod/scripts/apply-oled-patch.sh edgetx
+
+      - name: Pick build container
+        id: img
+        run: |
+          # Use the same dev image that EdgeTX's own CI uses for this version.
+          img=$(grep -oE 'ghcr\.io/edgetx/edgetx-dev:[A-Za-z0-9._-]+' \
+                  edgetx/.github/workflows/build_fw.yml | head -1)
+          [[ -n "$img" ]] || { echo "Could not find build image"; exit 1; }
+          echo "image=$img" >> "$GITHUB_OUTPUT"
+          echo "Using $img"
+
+      - name: Build
+        run: |
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:/w" -w /w/edgetx \
+            -e TARGET=${{ matrix.target }} \
+            -e VERSION=${{ needs.check.outputs.version }} \
+            -e STICK_MODE=${{ inputs.stick_mode || '2' }} \
+            -e OUT_DIR=/w/out \
+            ${{ steps.img.outputs.image }} \
+            bash /w/mod/scripts/build.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fw-${{ matrix.target }}
+          path: out/*.bin
+          if-no-files-found: error
+
+  release:
+    name: Publish release
+    needs: [check, build]
+    if: needs.check.outputs.build == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: out
+          merge-multiple: true
+
+      - name: Create pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.check.outputs.tag }}
+          MODE: ${{ inputs.stick_mode || '2' }}
+        run: |
+          set -euo pipefail
+          ls -l out
+          (cd out && sha256sum *.bin > SHA256SUMS.txt)
+          cat > notes.md <<EOF
+          OLED (SSD1309, 2.42" 128x64 SPI) firmware built automatically from
+          EdgeTX [$TAG](https://github.com/EdgeTX/edgetx/releases/tag/$TAG).
+
+          **Untested on hardware** - marked as pre-release until checked on a real radio.
+
+          Default stick mode: $MODE (can be changed in SYS > Radio setup).
+
+          Flashing (per DongkwanYi/OLEDBOXER):
+          1. Connect the original LCD, flash \`OLED<RADIO>-*.bin\` from the SD card.
+          2. Power off, swap to the OLED.
+          3. Power on, SYS > SD card > FIRMWARE > \`OLED<RADIO>-*-bootloader.bin\` > Flash bootloader.
+          4. Check stick mode.
+
+          OLED mod: https://github.com/DongkwanYi/OLEDBOXER
+          EOF
+          gh release delete "oled-$TAG" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag 2>/dev/null || true
+          gh release create "oled-$TAG" out/*.bin out/SHA256SUMS.txt \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "OLED EdgeTX $TAG" \
+            --notes-file notes.md \
+            --prerelease
