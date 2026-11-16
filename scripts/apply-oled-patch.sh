@@ -61,3 +61,24 @@ fi
 
 echo "OLED patch applied to $HAL:"
 grep -n -A3 -F "$MARK" "$HAL"
+
+# Radios with a PWM-driven LCD backlight (MT12, T12MAX) define
+# LCD_BRIGHTNESS_DEFAULT in board.h, which makes the bootloader call
+# backlightEnable() - not declared when OLED_SCREEN is set. An OLED has no
+# backlight (brightness = contrast), so drop that define for OLED builds.
+BOARD="$SRC/radio/src/targets/taranis/board.h"
+if grep -q '#define LCD_BRIGHTNESS_DEFAULT' "$BOARD" && ! grep -qF "$MARK" "$BOARD"; then
+  awk -v mark="$MARK" '
+    { print }
+    /#define LCD_BRIGHTNESS_DEFAULT/ { seen = 1 }
+    seen && !done && /^#endif/ {
+      print mark
+      print "#if defined(OLED_SCREEN)"
+      print "  #undef LCD_BRIGHTNESS_DEFAULT"
+      print "#endif"
+      done = 1
+    }
+  ' "$BOARD" > "$BOARD.tmp" && mv "$BOARD.tmp" "$BOARD"
+  echo "Disabled LCD_BRIGHTNESS_DEFAULT for OLED in $BOARD:"
+  grep -n -B6 -A3 -F "$MARK" "$BOARD"
+fi
